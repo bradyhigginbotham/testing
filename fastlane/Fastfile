@@ -1,0 +1,181 @@
+
+# This file contains the fastlane.tools configuration
+# You can find the documentation at https://docs.fastlane.tools
+#
+# For a list of all available actions, check out
+#
+#     https://docs.fastlane.tools/actions
+#
+# For a list of all available plugins, check out
+#
+#     https://docs.fastlane.tools/plugins/available-plugins
+#
+
+# Uncomment the line if you want fastlane to automatically update itself
+# update_fastlane
+
+default_platform(:ios)
+
+platform :ios do
+
+  desc 'Fetch certificates and provisioning profiles, create/update if needed'
+  lane :certificates_update do
+    match(
+      app_identifier: ['com.tryhampr.prestodriver', 'com.tryhampr.prestodriver.dev'], 
+      username: 'matiaspan@gmail.com',
+      type: 'appstore', 
+      readonly: false,
+      git_url: 'git@bitbucket.org:hamprdevs/io-keys.git',
+    )
+  end
+  
+  lane :deploy do
+    dev
+    prod
+  end
+  
+  desc "Push a new beta build to TestFlight"
+  lane :dev do
+    ENV["SCHEME"] = "Presto Driver Dev"
+    ENV["CONFIGURATION"] = "Dev.Release"
+    ENV["ENV_FILE"] = ".env.dev"
+    ENV["APP_IDENTIFIER"] = "com.tryhampr.prestodriver.dev"
+    ENV["DISPLAY_NAME"] = "Presto Driver Dev"
+
+    build_and_ship
+  end
+
+  lane :prod do
+    ENV["SCHEME"] = "Presto Driver Prod"
+    ENV["CONFIGURATION"] = "Release"
+    ENV["ENV_FILE"] = ".env"
+    ENV["APP_IDENTIFIER"] = "com.tryhampr.prestodriver"
+    ENV["DISPLAY_NAME"] = "Presto Driver"
+    
+    build_and_ship
+  end
+
+  lane :build_and_ship do
+    increment_build_number(xcodeproj: "ios/Presto Driver.xcodeproj")
+
+    update_app_identifier(
+      app_identifier: ENV["APP_IDENTIFIER"],
+      plist_path: './Presto Driver/Info.plist',
+      xcodeproj: './ios/Presto Driver.xcodeproj'
+    )
+
+    update_info_plist(
+      display_name: ENV["DISPLAY_NAME"],
+      plist_path: './Presto Driver/Info.plist',
+      xcodeproj: './ios/Presto Driver.xcodeproj'
+    )
+
+    # Bundle js code
+    sh "ENVFILE=#{ENV["ENV_FILE"]}; cd ..; react-native bundle --entry-file='index.js' --bundle-output='./ios/main.jsbundle' --sourcemap-output='./ios/Presto Driver/index.ios.bundle.map' --dev=false --platform='ios' --assets-dest='./ios'"
+    
+    sigh(
+      username: 'matiaspan@gmail.com',
+      app_identifier: ENV["APP_IDENTIFIER"], 
+      team_id: 'L56BBFH4VP',
+    )
+
+    update_project_provisioning(
+      xcodeproj: './ios/Presto Driver.xcodeproj',
+      target_filter: "Presto Driver", # matches name or type of a target
+      build_configuration: ENV["CONFIGURATION"],
+      # profile: "match AppStore " + ENV["APP_IDENTIFIER"], # optional if you use sigh
+      # code_signing_identity: "iPhone Development" # optionally specify the codesigning identity
+    )
+  
+    # Build app
+    gym(
+      scheme: ENV["SCHEME"], 
+      configuration: ENV["CONFIGURATION"],
+      workspace: 'ios/Presto Driver.xcworkspace',
+      verbose: false,
+    )
+
+    # Distribute beta to testers using TestFlight
+    pilot(
+      distribute_external: true,
+      changelog: 'Bug Fixes and Performance Improvements',
+      verbose: true,
+      username: 'matiaspan@gmail.com',
+      notify_external_testers: true,
+      groups: ["External Testers", "App Store Connect Users"],
+      skip_waiting_for_build_processing: false,
+      team_id: '119498328',
+      )
+  end
+
+end
+
+platform :android do
+
+  lane :dev do
+    ENV["VERSION_NAME"] = sh("jq .version ../package.json").to_s
+    ENV["VERSION_CODE"] = sh("jq .versionCode ../package.json").to_s
+
+    ENV["ENV_FILE"] = ".env.dev"
+    ENV["BUNDLE"] = "bundleDevDebugJsAndAssets"
+    ENV["ASSEMBLE"] = "assembleDevDebug"
+    ENV["FILES_TO_COPY"] = "app/build/outputs/apk/dev/debug/*"
+    build_and_ship
+  end
+
+  lane :prod do
+    ENV["VERSION_NAME"] = sh("jq .version ../package.json").to_s
+    ENV["VERSION_CODE"] = sh("jq .versionCode ../package.json").to_s
+
+    ENV["ENV_FILE"] = ".env"
+    
+    ENV["BUNDLE"] = "bundleProdDebugJsAndAssets"
+    ENV["ASSEMBLE"] = "assembleProdDebug"
+    ENV["FILES_TO_COPY"] = "app/build/outputs/apk/prod/debug/*"
+    build_and_ship
+  end
+
+  desc "Create a new beta build for android and save it locally"
+  lane :build_and_ship do
+
+    # bundle js code
+    sh "cd ..; react-native bundle --platform android --dev false --entry-file index.js --bundle-output android/app/src/main/assets/index.android.bundle --sourcemap-output android/app/src/main/assets/index.android.bundle.map --assets-dest android/app/src/main/res"
+    
+    # sh "cd ../android; rm -rf ./app/src/main/res/drawable-mdpi ./app/src/main/res/drawable-hdpi ./app/src/main/res/drawable-xhdpi ./app/src/main/res/drawable-xxhdpi ./app/src/main/res/drawable-xxxhdpi ./app/src/main/res/raw/"
+
+    sh "cd ..; cd android; ./gradlew #{ENV["BUNDLE"]} -PpreDexEnable=false -Pandroid.threadPoolSize=1 -Dorg.gradle.parallel=false -Dorg.gradle.jvmargs=\"-Xmx1024m -Xmx1024m -XX:MaxPermSize=4096m -XX:+HeapDumpOnOutOfMemoryError\" -Dorg.gradle.daemon=false;"
+    
+    # begin
+    #   sh "cd ../android; rm ./app/build/generated/res/react/prod/release/raw/package.json"
+    # rescue => ex  
+    #   sh "echo ${ex}"
+    # end
+
+    sh "export ENVFILE=#{ENV["ENV_FILE"]} export VERSION_NAME=#{ENV["VERSION_NAME"]} export VERSION_CODE=#{ENV["VERSION_CODE"]} cd ..; cd android; ./gradlew #{ENV["ASSEMBLE"]} --stacktrace -x #{ENV["BUNDLE"]} -PpreDexEnable=false -Pandroid.threadPoolSize=1 -Dorg.gradle.parallel=false -Dorg.gradle.jvmargs=\"-Xmx1024m -Xmx1024m -XX:MaxPermSize=4096m -XX:+HeapDumpOnOutOfMemoryError\" -Dorg.gradle.daemon=false"
+    
+    sh "cd ..; cd android; cp #{ENV["FILES_TO_COPY"]} ~/Desktop/android_exports"
+  end
+
+  lane :store do
+    ENV["VERSION_NAME"] = "1.1.0"#sh("jq .version ../package.json").to_s
+    ENV["VERSION_CODE"] = "263"#sh("jq .versionCode ../package.json").to_s
+
+    ENV["ENV_FILE"] = ".env"
+    
+    ENV["BUNDLE"] = "bundleProdReleaseJsAndAssets"
+    ENV["ASSEMBLE"] = "assembleProdRelease"
+    ENV["FILES_TO_COPY"] = "app/build/outputs/apk/prod/release/*"
+
+    # bundle js code
+    sh "cd ..; react-native bundle --platform android --dev false --entry-file index.js --bundle-output android/app/src/main/assets/index.android.bundle --sourcemap-output android/app/src/main/assets/index.android.bundle.map --assets-dest android/app/src/main/res"
+    
+    sh "cd ../android; rm -rf ./app/src/main/res/drawable-mdpi ./app/src/main/res/drawable-hdpi ./app/src/main/res/drawable-xhdpi ./app/src/main/res/drawable-xxhdpi ./app/src/main/res/drawable-xxxhdpi ./app/src/main/res/raw/"
+
+    sh "cd ..; cd android; ./gradlew #{ENV["BUNDLE"]} -PpreDexEnable=false -Pandroid.threadPoolSize=1 -Dorg.gradle.parallel=false -Dorg.gradle.jvmargs=\"-Xmx1024m -Xmx1024m -XX:MaxPermSize=4096m -XX:+HeapDumpOnOutOfMemoryError\" -Dorg.gradle.daemon=false;"
+    
+    sh "export ENVFILE=#{ENV["ENV_FILE"]} export VERSION_NAME=#{ENV["VERSION_NAME"]} export VERSION_CODE=#{ENV["VERSION_CODE"]}; cd ..; cd android; ./gradlew #{ENV["ASSEMBLE"]} --stacktrace -x #{ENV["BUNDLE"]} -PpreDexEnable=false -Pandroid.threadPoolSize=1 -Dorg.gradle.parallel=false -Dorg.gradle.jvmargs=\"-Xmx1024m -Xmx1024m -XX:MaxPermSize=4096m -XX:+HeapDumpOnOutOfMemoryError\" -Dorg.gradle.daemon=false;"
+    
+    sh "cd ..; cd android; cp #{ENV["FILES_TO_COPY"]} ~/Desktop/android_exports"
+  end
+
+end
